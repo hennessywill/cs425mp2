@@ -69,14 +69,6 @@ def main(argv):
         sys.exit(2)
 
 
-    """ Create the socket for this process """
-    # try:
-    #     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) #DGRAM = UDP
-    # except socket.error:
-    #     print 'Failed to create socket'
-    #     sys.exit()
-         
-
 
     """ read in an array of IP addresses from the config file 
         CLIENTS - an array of addresses to all the other processes """
