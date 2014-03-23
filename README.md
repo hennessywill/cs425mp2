@@ -14,12 +14,15 @@ Example:
 We have created three config files: config1.txt, config2.txt, and config3.txt
 
 In one terminal, execute
-    python2 chat.py configs/config1.txt 1 1
+    python2 chat.py configs/config1.txt 1000 .1
 
 In a second terminal, execute
-    python2 chat.py configs/config2.txt 1 1
+    python2 chat.py configs/config2.txt 1000 .1
 
 In a third terminal, execute
-    python2 chat.py configs/config3.txt 1 1
+    python2 chat.py configs/config3.txt 1000 .1
+
 
 Then each terminal can type in a message and it will be sent to all the others.
+average delay is 1000 milliseconds
+probability of dropping a message is .1
