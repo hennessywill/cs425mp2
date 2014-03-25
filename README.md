@@ -7,6 +7,8 @@ A python, command line chat client that communicates via reliable multicast.
 
 List all member IP addresses in config.txt, with the first line containing
 the IP address of the number of your client.
+Give each IP address a port - it can be any available port on your machine.
+If all the chat clients are on the same localhost, assign each a unique port.
 
 
 
