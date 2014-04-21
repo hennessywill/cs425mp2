@@ -13,6 +13,8 @@ from time import sleep
 from thread import *
 import copy
 
+from Queue import PriorityQueue
+
 
 UNDELIVERED = []    # a list of all messages that have not been delivered
 GROUP = []          # a list of addresses of all the group members
@@ -24,6 +26,22 @@ SOCK = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # this process' socket
 DELAY_TIME = 0      # average delay time (milliseconds)
 DROP_RATE = 0       # probability of dropping a message (between 0 and 1.0)
 ACK_MSG = "ack"     # static string
+ORDERING = ""
+CAUSAL_STR = "causal"
+TOTAL_STR = "total"
+PRI_QUEUE = PriorityQueue()
+PROPOSED_PRIORITY = 0
+NUM_DELIVERED = 0
+
+
+
+def parse_timestamp_dict(curr_timestamps):
+    """ Runs through the TIMESTAMPS dict separating keys and values by commas,
+        and separating each (key, value) pair with a # """
+    retval = ""
+    for key, value in curr_timestamps.items():
+        retval += "#" + key + "," + str(value)
+    return retval
 
 
 
@@ -87,41 +105,46 @@ def unicast_receive():
     """ Receive a single message from a single client.
         Implement a randomized delay before delivering the message """
     content, addr = SOCK.recvfrom(4096)
-    components = content.split("#")     # format is 'msg_id#message#sender_addr#timestamps'
-    msg_id = components[0]
-    message = components[1]
-    sender_addr = ""
-    if message != "ack":
-        sender_addr = components[2]
+    # print content
+    if "order*" not in content and "final*" not in content:
+        components = content.split("#")     # format is 'msg_id#message#sender_addr#timestamps'
+        msg_id = components[0]
+        message = components[1]
+        sender_addr = ""
 
-    received_timestamps = {}
+        if message != "ack" and "order*" not in content:
+            sender_addr = components[2]
 
-    # Parse the timestamps
-    for i in range(3, len(components)):
-        timestamp = components[i]
-        timestamp_pair = timestamp.split(",")
-        timestamp_key = timestamp_pair[0]
-        timestamp_value = int(timestamp_pair[1])
+        received_timestamps = {}
 
-        received_timestamps[timestamp_key] = timestamp_value
+        # Parse the timestamps
+        for i in range(3, len(components)):
+            timestamp = components[i]
+            timestamp_pair = timestamp.split(",")
+            timestamp_key = timestamp_pair[0]
+            timestamp_value = int(timestamp_pair[1])
+
+            received_timestamps[timestamp_key] = timestamp_value
 
 
     
 
-    if message == ACK_MSG:
-        # we received an ack message. update ACK so unicast_send can break out of loop
-        ACKS[msg_id] = True
+        if message == ACK_MSG:
+            # we received an ack message. update ACK so unicast_send can break out of loop
+            ACKS[msg_id] = True
 
+        else:
+            # we have received a content message. send ack back to sender.
+            # if we have already seen this message, mark it None so we don't deliver it twice
+            SOCK.sendto( msg_id + "#" + ACK_MSG, addr ) # send acknowledgement message
+            if unique_id(msg_id, addr) in RECEIVED:
+                message = None
+            RECEIVED[unique_id(msg_id, addr)] = True
+
+        return message, addr, sender_addr, received_timestamps
+    
     else:
-        # we have received a content message. send ack back to sender.
-        # if we have already seen this message, mark it None so we don't deliver it twice
-        SOCK.sendto( msg_id + "#" + ACK_MSG, addr ) # send acknowledgement message
-        if unique_id(msg_id, addr) in RECEIVED:
-            message = None
-        RECEIVED[unique_id(msg_id, addr)] = True
-
-    return message, addr, sender_addr, received_timestamps
-
+        return content, addr, None, None
 
 
 def deliver(source, message, received_timestamps):
@@ -137,12 +160,17 @@ def deliver(source, message, received_timestamps):
 
     
     # Check if any other messages can now be delivered
-    for (addr, message, sender_addr, received_timestamps) in UNDELIVERED:
-        if should_deliver(addr, message, sender_addr, received_timestamps):
-            deliver(addr, message, received_timestamps)
-            UNDELIVERED.remove( (addr, message, sender_addr, received_timestamps) )
+    if ORDERING == CAUSAL_STR:
+        for (addr, message, sender_addr, received_timestamps) in UNDELIVERED:
+            if causal_should_deliver(addr, message, sender_addr, received_timestamps):
+                deliver(addr, message, received_timestamps)
+                UNDELIVERED.remove( (addr, message, sender_addr, received_timestamps) )
 
-
+        # Check if any other messages can now be delivered
+        for (addr, message, sender_addr, received_timestamps) in UNDELIVERED:
+            if causal_should_deliver(addr, message, sender_addr, received_timestamps):
+                deliver(addr, message, received_timestamps)
+                UNDELIVERED.remove( (addr, message, sender_addr, received_timestamps) )
 
 
 def unicast_send_thread(dest_addr, message, msg_id, curr_timestamps):
@@ -169,18 +197,46 @@ def multicast(message):
             CURR_MSG_ID += 1
             curr_timestamps = copy.deepcopy(TIMESTAMPS)
             start_new_thread( unicast_send_thread, (addr, message, str(CURR_MSG_ID), curr_timestamps) )
-            #unicast_send(addr, message)
 
+    #unicast_send(addr, message)
+    # if this is total ordering, then wait for all the replies
+    if ORDERING == TOTAL_STR:
+        # DONE (implemented, not verified)
+        global reply_dict
+        reply_dict = {} # I believe this should clear the dictionary, not 100% sure though
+        while len(reply_dict) != len(GROUP)-1:
+            sleep(.1)
+        final_priority = -1
+        for val in reply_dict.values():
+            if(val > final_priority):
+                final_priority = val
 
-def should_deliver(message, addr, sender_addr, received_timestamps):
+        start_new_thread(reply_to_processes, (message, final_priority)) # This takes the place of the multicast (so we don't recurse)
+
+        # while global dict .size() != # of processes we are waiting on:
+            # have the recv thread modify the dict as it receives "order*" messages
+            # sleep(.1) # arbitrary number to mitigate busy waiting
+        # final_priority = max( dict_of_received_priorities )
+        # multicast( final_priority along with whatever message data is necessary )
+        # ... we don't want to recurse infinitely on multicast, so figure out an if statment
+        # clear the dictionary for next time
+
+def reply_to_processes(message, priority):
+    for addr in GROUP:
+        #if addr[0] + str(addr[1]) != PROCESS_ID:
+        SOCK.sendto(str(addr) + "#" + "final*" + str(priority) + "*" + message, addr)
+            
+
+def causal_should_deliver(message, addr, sender_addr, received_timestamps):
         received_time = received_timestamps[sender_addr]
-        print "received_time: " + str(received_time)
+        #print "received_time: " + str(received_time)
         current_time = TIMESTAMPS[sender_addr]
-        print "current_time: " + str(current_time)
-        if message != None and message != ACK_MSG and received_time == current_time + 1:
+        #print "current_time: " + str(current_time)
+        
+        ### DONE do this part if its causal. implement a new should_deliver for total using the queue
+        if message != None and message != ACK_MSG and received_time == current_time + 1 and ORDERING == CAUSAL_STR:
             should_deliver = True
             for key in received_timestamps:
-                
                 # Vj[k] <= Vi[k] (k != j)
                 # Check that all other timestamps in received vector
                 # are less than or equal to the timestamps in the current vector
@@ -188,8 +244,7 @@ def should_deliver(message, addr, sender_addr, received_timestamps):
                 current_time = TIMESTAMPS[key]
                 if key != sender_addr and received_time > current_time:
                      return False
-            
-            return True 
+            return True
         else:
             return False
 
@@ -200,14 +255,86 @@ def recv_messages_thread(args):
         message, addr, sender_addr, received_timestamps = unicast_receive()
         
         if message != ACK_MSG and message != None:
-            if should_deliver(message, addr, sender_addr, received_timestamps):
-                deliver(addr, message, received_timestamps)
-            else:
+            if ORDERING == CAUSAL_STR and causal_should_deliver(message, addr, sender_addr, received_timestamps):
+                deliver(addr, message, received_timestamps)              
+
+            elif ORDERING == CAUSAL_STR:
                 UNDELIVERED.append((addr, message, sender_addr, received_timestamps))
-                print UNDELIVERED
+            
+            elif ORDERING == TOTAL_STR:
+                if "order*" in message:
+                    # TODO
+                    # we are receiving a replied proposed priority from the messages
+                    # so add it to the global dict  (do we have to?)
+                    # use message.split('#') to get a tuple ("order*", proposed_priority)
+                    message_arr = message.split('*');
+                    sender_addr = message_arr[2]
+                    reply_dict[sender_addr] = message_arr[1]
+                    #print "order received"
+                    #print sender_addr
+
+                elif "final*" in message:
+                    # TODO
+                    # we are receiving a final priority number from the sender.
+                    # the given message is already in the priority queue
+                    # what we need to do here is
+                    #    remove that message from the priority queue
+                    #    change its priority number to the new final priority number
+                    #    mark that message as isDeliverable=True
+                    #    put that message back in the queue
+                    #       note:  PRI_QUEUE.put( (final_priority, (True, (addr, message, sender_addr, received_timestamps)) ) )
+                    # print message
+                    message_arr = message.split('#')
+                    message_arr = message_arr[1].split('*')
+                    PRI_QUEUE.put((message_arr[1], (True, (addr, message_arr[2], sender_addr, received_timestamps))))
+                    total_deliver()
+                
+                else:
+                    # DONE
+                    # we are receiving a new message. propose a priority, send it back to
+                    # the sender, and put this in the queue with isDeliverable=False
+                    global PROPOSED_PRIORITY
+                    PROPOSED_PRIORITY += 1  # increment the proposed priority
+                    # put (sequence number, (isDeliverable, (message tuple)) )
+                    # PRI_QUEUE.put( (PROPOSED_PRIORITY, (False, (addr, message, sender_addr, received_timestamps)) ) )
+                    # send our proposed priority back to the one who sent the message
+
+                    SOCK.sendto("order*" + str(PROPOSED_PRIORITY) + "*" + str(PROCESS_ID), addr)
+
+
+def total_deliver():
+    if PRI_QUEUE.empty():
+        return
+
+    else:
+        global NUM_DELIVERED
+        
+        print ""
+        tup = PRI_QUEUE.queue[0]
+        # print tup
+        # print NUM_DELIVERED
+        if int(tup[0]) == NUM_DELIVERED + 1:
+            # print "delivery!"
+            tup_in_tup = tup[1]
+            info = tuple(tup_in_tup[1])
+            source = info[0]
+            
+            user = source[0] + ":" + str(source[1])
+            message = info[1]
+            print user + " -- " + message
+            
+            NUM_DELIVERED += 1
+            PROPOSED_PRIORITY = NUM_DELIVERED
+
+            PRI_QUEUE.get()
+            total_deliver()
 
 
 def main(argv):
+
+    global NUM_DELIVERED
+    NUM_DELIVERED = 0
+
     """ Get command line arguments """
     if( len(argv) == 3 ):
         config_file_name = argv[0]
@@ -220,10 +347,15 @@ def main(argv):
         sys.exit(2)
 
 
-
     """ Read in an array of IP addresses from the config file 
         GROUP - an array of addresses to all the other processes """
     ip_addrs = read_config_file(config_file_name)
+
+    global ORDERING
+    ORDERING = ip_addrs[0]
+    if ORDERING != CAUSAL_STR and ORDERING != TOTAL_STR:
+        print "the first line of the config file must be either 'causal' or 'total"
+        sys.exit(2)
     for i in range(1, len(ip_addrs)):
         addr = ip_addrs[i]
         group_tuple = parse_addr(addr)
@@ -231,6 +363,8 @@ def main(argv):
         if i==1:
             global PROCESS_ID
             PROCESS_ID=group_tuple[0] + str(group_tuple[1])
+            global PROCESS_ADDR
+            PROCESS_ADDR = group_tuple
 
         # Initialize timestamp dict
         TIMESTAMPS[group_tuple[0]+str(group_tuple[1])] = 0
@@ -253,13 +387,12 @@ def main(argv):
     print "*****  Type a message and hit return to send."
     print "*****"
 
+    global PRI_QUEUE
 
     """ Prompt the user for input and mulicast that message to all other GROUPs """
     while True:
         msg_to_send = raw_input("")
         multicast(msg_to_send)
-
-
 
 
 
